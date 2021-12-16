@@ -16,20 +16,20 @@ type Metadata struct {
 }
 
 type cacheShard struct {
-	hashmap     map[uint64]uint32
-	entries     queue.BytesQueue
-	lock        sync.RWMutex
-	entryBuffer []byte
-	onRemove    onRemoveCallback
+	hashmap     map[uint64]uint32 //uint64:key的hash值，uint32：存储在bytesQueue的开始下标
+	entries     queue.BytesQueue  //实际存储的结构,字节数组，一个环形队列
+	lock        sync.RWMutex      //读写锁
+	entryBuffer []byte            //用于set的时候临时存放要set的value值
+	onRemove    onRemoveCallback  //触发删除时的回调函数
 
-	isVerbose    bool
-	statsEnabled bool
-	logger       Logger
-	clock        clock
-	lifeWindow   uint64
+	isVerbose    bool   //是否打日志
+	statsEnabled bool   //是否计算请求缓存资源的次数
+	logger       Logger //日志
+	clock        clock  //时间获取的方法
+	lifeWindow   uint64 //过期时间
 
-	hashmapStats map[uint64]uint32
-	stats        Stats
+	hashmapStats map[uint64]uint32 //计数
+	stats        Stats             //计数的结构
 }
 
 func (s *cacheShard) getWithInfo(key string, hashedKey uint64) (entry []byte, resp Response, err error) {
@@ -61,12 +61,16 @@ func (s *cacheShard) getWithInfo(key string, hashedKey uint64) (entry []byte, re
 
 func (s *cacheShard) get(key string, hashedKey uint64) ([]byte, error) {
 	s.lock.RLock()
+	//getWrappedEntry，通过hashedkey获取array下标，并且把对应的数据读取出来
 	wrappedEntry, err := s.getWrappedEntry(hashedKey)
 	if err != nil {
 		s.lock.RUnlock()
 		return nil, err
 	}
+	//解析信息判断存储的key和传进来的key是否是同一个
 	if entryKey := readKeyFromEntry(wrappedEntry); key != entryKey {
+		//不相同，value的值不是当前key对应的值，而是与其hash冲突的另外一个key的值
+
 		s.lock.RUnlock()
 		s.collision()
 		if s.isVerbose {
@@ -74,10 +78,10 @@ func (s *cacheShard) get(key string, hashedKey uint64) ([]byte, error) {
 		}
 		return nil, ErrEntryNotFound
 	}
+	//相同就解析出value值返回
 	entry := readEntry(wrappedEntry)
 	s.lock.RUnlock()
 	s.hit(hashedKey)
-
 	return entry, nil
 }
 
@@ -118,10 +122,14 @@ func (s *cacheShard) getValidWrapEntry(key string, hashedKey uint64) ([]byte, er
 }
 
 func (s *cacheShard) set(key string, hashedKey uint64, entry []byte) error {
-	currentTimestamp := uint64(s.clock.Epoch())
+	currentTimestamp := uint64(s.clock.Epoch()) ////先取个当前时间
 
-	s.lock.Lock()
-
+	s.lock.Lock() //该分片加锁
+	//看下这个hash值存不存在，hashmap的key是hash值，value对应的是queue的下标。
+	//ps：一开始分析这里的时候，发现是通过判断下标是否等于0来判断存不存在的。当时我想，第一个值的下标不就是0吗，
+	//那第一个值岂不是判断不能判断是否存在？？.........
+	//后来看到bytes_queue.go有一个常量，leftMarginIndex = 1，
+	//索引从1开始，不使用0下标......兄弟，套路有点多啊.
 	if previousIndex := s.hashmap[hashedKey]; previousIndex != 0 {
 		if previousEntry, err := s.entries.Get(int(previousIndex)); err == nil {
 			resetKeyFromEntry(previousEntry)
@@ -129,19 +137,24 @@ func (s *cacheShard) set(key string, hashedKey uint64, entry []byte) error {
 			delete(s.hashmap, hashedKey)
 		}
 	}
-
+	//取队列里的第一个值，执行onEvict方法，检查第一个key是否过期，过期就执行删除的回调方法，删除
+	//ps:假设同时符合hash冲突和第一个元素并且过期，那边回调函数是不是就拿不到过期key的信息了？
+	//因为在上面hash冲突的时候已经把旧的值清掉了，很边缘的情况。有没有有志之士验证一下哈
 	if oldestEntry, err := s.entries.Peek(); err == nil {
 		s.onEvict(oldestEntry, currentTimestamp, s.removeOldestEntry)
 	}
+	//构造实际存储的byte数组
 
 	w := wrapEntry(currentTimestamp, hashedKey, key, entry, &s.entryBuffer)
 
 	for {
 		if index, err := s.entries.Push(w); err == nil {
+			//插入成功
 			s.hashmap[hashedKey] = uint32(index)
 			s.lock.Unlock()
 			return nil
 		}
+		//插入不成功（队列full了）就淘汰队头元素，for继续插入
 		if s.removeOldestEntry(NoSpace) != nil {
 			s.lock.Unlock()
 			return fmt.Errorf("entry is bigger than max shard size")

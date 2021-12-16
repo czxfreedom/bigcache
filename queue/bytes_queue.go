@@ -22,16 +22,16 @@ var (
 // BytesQueue is a non-thread safe queue type of fifo based on bytes array.
 // For every push operation index of entry is returned. It can be used to read the entry later
 type BytesQueue struct {
-	full         bool
-	array        []byte
-	capacity     int
-	maxCapacity  int
-	head         int
-	tail         int
+	full         bool   //是否满了
+	array        []byte //存储的地方byte数组
+	capacity     int    //当前容量
+	maxCapacity  int    //最大可扩容到多少，<=0无限扩容
+	head         int    //head下标
+	tail         int    //tail下标
 	count        int
 	rightMargin  int
-	headerBuffer []byte
-	verbose      bool
+	headerBuffer []byte //约定：每个value存储时要加header信息
+	verbose      bool   ////日志
 }
 
 type queueError struct {

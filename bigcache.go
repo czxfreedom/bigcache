@@ -13,13 +13,13 @@ const (
 // It keeps entries on heap but omits GC for them. To achieve that, operations take place on byte arrays,
 // therefore entries (de)serialization in front of the cache will be needed in most use cases.
 type BigCache struct {
-	shards     []*cacheShard
-	lifeWindow uint64
-	clock      clock
-	hash       Hasher
-	config     Config
-	shardMask  uint64
-	close      chan struct{}
+	shards     []*cacheShard //分片
+	lifeWindow uint64        //过期时间
+	clock      clock         //时间获取的方法
+	hash       Hasher        //hash算法
+	config     Config        //配置文件
+	shardMask  uint64        //常量：分片数-1，用于&运算替换取模运算
+	close      chan struct{} //控制关闭
 }
 
 // Response will contain metadata about the entry for which GetWithInfo(key) was called
@@ -46,6 +46,7 @@ func NewBigCache(config Config) (*BigCache, error) {
 }
 
 func newBigCache(config Config, clock clock) (*BigCache, error) {
+	//碎片数必须是2的幂次方
 	if !isPowerOfTwo(config.Shards) {
 		return nil, fmt.Errorf("Shards number must be power of two")
 	}
@@ -72,7 +73,7 @@ func newBigCache(config Config, clock clock) (*BigCache, error) {
 		shardMask:  uint64(config.Shards - 1),
 		close:      make(chan struct{}),
 	}
-
+	//设置回调函数
 	var onRemove func(wrappedEntry []byte, reason RemoveReason)
 	if config.OnRemoveWithMetadata != nil {
 		onRemove = cache.providedOnRemoveWithMetadata
@@ -88,6 +89,7 @@ func newBigCache(config Config, clock clock) (*BigCache, error) {
 		cache.shards[i] = initNewShard(config, onRemove, clock)
 	}
 
+	//定时删除过期缓存协程
 	if config.CleanWindow > 0 {
 		go func() {
 			ticker := time.NewTicker(config.CleanWindow)
@@ -118,9 +120,9 @@ func (c *BigCache) Close() error {
 // It returns an ErrEntryNotFound when
 // no entry exists for the given key.
 func (c *BigCache) Get(key string) ([]byte, error) {
-	hashedKey := c.hash.Sum64(key)
-	shard := c.getShard(hashedKey)
-	return shard.get(key, hashedKey)
+	hashedKey := c.hash.Sum64(key)   //计算key的hash值
+	shard := c.getShard(hashedKey)   //确定分片
+	return shard.get(key, hashedKey) //执行分片的get方法
 }
 
 // GetWithInfo reads entry for the key with Response info.
@@ -134,9 +136,9 @@ func (c *BigCache) GetWithInfo(key string) ([]byte, Response, error) {
 
 // Set saves entry under the key
 func (c *BigCache) Set(key string, entry []byte) error {
-	hashedKey := c.hash.Sum64(key)
-	shard := c.getShard(hashedKey)
-	return shard.set(key, hashedKey, entry)
+	hashedKey := c.hash.Sum64(key)          ////计算key的hash值
+	shard := c.getShard(hashedKey)          //确定分片
+	return shard.set(key, hashedKey, entry) //执行分片的set方法
 }
 
 // Append appends entry under the key if key exists, otherwise
@@ -222,7 +224,10 @@ func (c *BigCache) cleanUp(currentTimestamp uint64) {
 	}
 }
 
+//这样设计的好处就是计算余数可以使用位运算快速计算
+//根据key,获取hash在哪块分片上
 func (c *BigCache) getShard(hashedKey uint64) (shard *cacheShard) {
+	//hashedKey&c.shardMask == hashedkey%c.shards
 	return c.shards[hashedKey&c.shardMask]
 }
 
